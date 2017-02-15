@@ -19,6 +19,7 @@
   <run_depend>diagnostic_msgs</run_depend>
   <run_depend>diagnostic_updater</run_depend>
   <run_depend>geodesy</run_depend>
+  <run_depend>gps_common</run_depend>
   <run_depend>novatel_msgs</run_depend>
   <run_depend>python-serial</run_depend>
   <run_depend>rospy</run_depend>

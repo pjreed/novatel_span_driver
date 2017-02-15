@@ -30,10 +30,12 @@ import rospy
 import tf
 import geodesy.utm
 
+from datetime import datetime, timedelta
 from novatel_msgs.msg import BESTPOS, CORRIMUDATA, INSCOV, INSPVAX
 from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Quaternion, Point, Pose, Twist
+from gps_common.msg import GPSFix, GPSStatus
 
 from math import radians, pow
 
@@ -91,6 +93,7 @@ class NovatelPublisher(object):
         self.pub_odom = rospy.Publisher('navsat/odom', Odometry, queue_size=1)
         self.pub_origin = rospy.Publisher('navsat/origin', Pose, queue_size=1)
         self.pub_navsatfix = rospy.Publisher('navsat/fix', NavSatFix, queue_size=1)
+        self.pub_gpsfix = rospy.Publisher('navsat/gps', GPSFix, queue_size=1)
 
         if self.publish_tf:
             self.tf_broadcast = tf.TransformBroadcaster()
@@ -106,17 +109,56 @@ class NovatelPublisher(object):
         rospy.Subscriber('novatel_data/inscov', INSCOV, self.inscov_handler)
         rospy.Subscriber('novatel_data/inspvax', INSPVAX, self.inspvax_handler)
 
+    def leap(self, date):
+        """
+        Return the number of leap seconds since 6/Jan/1980
+        :param date: datetime instance
+        :return: leap seconds for the date (int)
+        """
+        if date < datetime(1981, 6, 30, 23, 59, 59):
+            return 0
+        leap_list = [(1981, 6, 30), (1982, 6, 30), (1983, 6, 30),
+                     (1985, 6, 30), (1987, 12, 31), (1989, 12, 31),
+                     (1990, 12, 31), (1992, 6, 30), (1993, 6, 30),
+                     (1994, 6, 30), (1995, 12, 31), (1997, 6, 30),
+                     (1998, 12, 31), (2005, 12, 31), (2008, 12, 31),
+                     (2012, 6, 30), (2015, 6, 30)]
+        leap_dates = map(lambda x: datetime(x[0], x[1], x[2], 23, 59, 59), leap_list)
+        for j in xrange(len(leap_dates[:-1])):
+            if leap_dates[j] < date < leap_dates[j + 1]:
+                return j + 1
+        return len(leap_dates)
+
+    def gps2utc(self, week, secs):
+        """
+        :param week: GPS week number, i.e. 1866
+        :param secs: number of seconds since the beginning of `week`
+        :return: datetime instance with UTC time
+        """
+        secs_in_week = 604800
+        gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
+        date_before_leaps = gps_epoch + timedelta(seconds=week * secs_in_week + secs)
+        return date_before_leaps - timedelta(seconds=self.leap(date_before_leaps))
+
     def bestpos_handler(self, bestpos):
         navsat = NavSatFix()
+        gpsfix = GPSFix()
 
         # TODO: The timestamp here should come from SPAN, not the ROS system time.
         navsat.header.stamp = rospy.Time.now()
         navsat.header.frame_id = self.odom_frame
+        gpsfix.header.stamp = navsat.header.stamp
+        gpsfix.header.frame_id = self.odom_frame
+
+        utc_stamp = self.gps2utc(bestpos.header.gps_week, bestpos.header.gps_week_seconds)
+        gpsfix.time = (utc_stamp - datetime.datetime(1970, 1, 1)).total_seconds()
 
         # Assume GPS - this isn't exposed
         navsat.status.service = NavSatStatus.SERVICE_GPS
-
-        position_type_to_status = {
+        gpsfix.status.header = gpsfix.header
+        gpsfix.status.position_source = GPSStatus.SOURCE_GPS
+        
+        navsat_position_type_to_status = {
             BESTPOS.POSITION_TYPE_NONE: NavSatStatus.STATUS_NO_FIX,
             BESTPOS.POSITION_TYPE_FIXED: NavSatStatus.STATUS_FIX,
             BESTPOS.POSITION_TYPE_FIXEDHEIGHT: NavSatStatus.STATUS_FIX,
@@ -151,22 +193,70 @@ class NovatelPublisher(object):
             BESTPOS.POSITION_TYPE_INS_PPP_CONVERGING: NavSatStatus.STATUS_SBAS_FIX,
             BESTPOS.POSITION_TYPE_INS_PPP: NavSatStatus.STATUS_SBAS_FIX,
             }
-        navsat.status.status = position_type_to_status.get(bestpos.position_type,
-                                                           NavSatStatus.STATUS_NO_FIX)
-
+        navsat.status.status = navsat_position_type_to_status.get(bestpos.position_type,
+                                                                  NavSatStatus.STATUS_NO_FIX)
+        gpsfix_position_type_to_status = {
+            BESTPOS.POSITION_TYPE_NONE: GPSStatus.STATUS_NO_FIX,
+            BESTPOS.POSITION_TYPE_FIXED: GPSStatus.STATUS_FIX,
+            BESTPOS.POSITION_TYPE_FIXEDHEIGHT: GPSStatus.STATUS_FIX,
+            BESTPOS.POSITION_TYPE_FLOATCONV: GPSStatus.STATUS_FIX,
+            BESTPOS.POSITION_TYPE_WIDELANE: GPSStatus.STATUS_FIX,
+            BESTPOS.POSITION_TYPE_NARROWLANE: GPSStatus.STATUS_FIX,
+            BESTPOS.POSITION_TYPE_DOPPLER_VELOCITY: GPSStatus.STATUS_FIX,
+            BESTPOS.POSITION_TYPE_SINGLE: GPSStatus.STATUS_FIX,
+            BESTPOS.POSITION_TYPE_PSRDIFF: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_WAAS: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_PROPAGATED: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_OMNISTAR: GPSStatus.STATUS_SBAS_FIX,
+            BESTPOS.POSITION_TYPE_L1_FLOAT: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_IONOFREE_FLOAT: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_NARROW_FLOAT: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_L1_INT: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_WIDE_INT: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_NARROW_INT: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_RTK_DIRECT_INS: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_SBAS: GPSStatus.STATUS_SBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_PSRSP: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_PSRDIFF: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_RTKFLOAT: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_RTKFIXED: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_OMNISTAR: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_OMNISTAR_HP: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_OMNISTAR_XP: GPSStatus.STATUS_GBAS_FIX,
+            BESTPOS.POSITION_TYPE_OMNISTAR_HP: GPSStatus.STATUS_SBAS_FIX,
+            BESTPOS.POSITION_TYPE_OMNISTAR_XP: GPSStatus.STATUS_SBAS_FIX,
+            BESTPOS.POSITION_TYPE_PPP_CONVERGING: GPSStatus.STATUS_SBAS_FIX,
+            BESTPOS.POSITION_TYPE_PPP: GPSStatus.STATUS_SBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_PPP_CONVERGING: GPSStatus.STATUS_SBAS_FIX,
+            BESTPOS.POSITION_TYPE_INS_PPP: GPSStatus.STATUS_SBAS_FIX,
+            }
+        gpsfix.status.status = gpsfix_position_type_to_status.get(bestpos.position_type,
+                                                                  NavSatStatus.STATUS_NO_FIX)
         # Position in degrees.
         navsat.latitude = bestpos.latitude
         navsat.longitude = bestpos.longitude
+        gpsfix.latitude = bestpos.latitude
+        gpsfix.longitude = bestpos.longitude
 
         # Altitude in metres.
         navsat.altitude = bestpos.altitude
+        gpsfix.altitude = bestpos.altitude
         navsat.position_covariance[0] = pow(2, bestpos.latitude_std)
+        gpsfix.position_covariance[0] = navsat.position_covariance[0]
         navsat.position_covariance[4] = pow(2, bestpos.longitude_std)
+        gpsfix.position_covariance[4] = navsat.position_covariance[4]
         navsat.position_covariance[8] = pow(2, bestpos.altitude_std)
+        gpsfix.position_covariance[8] = navsat.position_covariance[8]
         navsat.position_covariance_type = NavSatFix.COVARIANCE_TYPE_DIAGONAL_KNOWN
+        gpsfix.position_covariance_type = GPSFix.COVARIANCE_TYPE_DIAGONAL_KNOWN
+
+        # Satellite information
+        gpsfix.status.satellites_used = bestpos.sol_svs
+        gpsfix.status.satellites_visible = bestpos.svs
 
         # Ship ito
         self.pub_navsatfix.publish(navsat)
+        self.pub_gpsfix.publish(gpsfix)
 
     def inspvax_handler(self, inspvax):
         # Convert the latlong to x,y coordinates and publish an Odometry
