@@ -37,7 +37,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Quaternion, Point, Pose, Twist
 from gps_common.msg import GPSFix, GPSStatus
 
-from math import radians, pow
+from math import radians, pow, sqrt
 
 # FIXED COVARIANCES
 # TODO: Work these out...
@@ -81,6 +81,9 @@ class NovatelPublisher(object):
         self.publish_tf = rospy.get_param('~publish_tf', False)
         self.odom_frame = rospy.get_param('~odom_frame', 'odom_combined')
         self.base_frame = rospy.get_param('~base_frame', 'base_link')
+
+        # Most recently received inspvax message
+        self.last_inspvax = None
 
         # When True, UTM odom x, y pose will be published with respect to the
         # first coordinate received.
@@ -151,7 +154,7 @@ class NovatelPublisher(object):
         gpsfix.header.frame_id = self.odom_frame
 
         utc_stamp = self.gps2utc(bestpos.header.gps_week, bestpos.header.gps_week_seconds)
-        gpsfix.time = (utc_stamp - datetime.datetime(1970, 1, 1)).total_seconds()
+        gpsfix.time = (utc_stamp - datetime(1970, 1, 1)).total_seconds()
 
         # Assume GPS - this isn't exposed
         navsat.status.service = NavSatStatus.SERVICE_GPS
@@ -256,9 +259,15 @@ class NovatelPublisher(object):
 
         # Ship ito
         self.pub_navsatfix.publish(navsat)
-        self.pub_gpsfix.publish(gpsfix)
+
+        if self.last_inspvax is not None:
+            gpsfix.track = self.last_inspvax.azimuth
+            gpsfix.speed = sqrt(pow(self.last_inspvax.north_velocity, 2.0) +
+                                pow(self.last_inspvax.east_velocity, 2.0))
+            self.pub_gpsfix.publish(gpsfix)
 
     def inspvax_handler(self, inspvax):
+        self.last_inspvax = inspvax
         # Convert the latlong to x,y coordinates and publish an Odometry
         try:
             utm_pos = geodesy.utm.fromLatLong(inspvax.latitude, inspvax.longitude)
